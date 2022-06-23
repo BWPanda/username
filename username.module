@@ -1,0 +1,189 @@
+<?php
+/**
+ * @file
+ * Automatically generate usernames based on a token string.
+ */
+
+/**
+ * Implements hook_config_info().
+ */
+function username_config_info() {
+  return array(
+    'username.settings' => array(
+      'label' => t('Username settings'),
+      'group' => t('Configuration'),
+    ),
+  );
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter() for user_admin_settings().
+ */
+function username_form_user_admin_settings_alter(&$form, &$form_state, $form_id) {
+  $config = config('username.settings');
+
+  $form['username'] = array(
+    '#type' => 'details',
+    '#summary' => t('Username'),
+    '#open' => TRUE,
+    '#weight' => 5,
+    '#config' => 'username.settings',
+  );
+  $form['username']['automatic'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Automatically generate usernames'),
+    '#default_value' => $config->get('automatic'),
+  );
+  $form['username']['pattern'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Pattern'),
+    '#description' => t('The token string used to generate usernames. !token_link', array(
+      '!token_link' => theme('token_tree_link', array('token_types' => array('user'))),
+    )),
+    '#default_value' => $config->get('pattern'),
+    '#element_validate' => array('token_element_validate'),
+    '#token_types' => array('user'),
+    '#states' => array(
+      'visible' => array(
+        ':input[name=automatic]' => array('checked' => TRUE),
+      ),
+      'required' => array(
+        ':input[name=automatic]' => array('checked' => TRUE),
+      ),
+    ),
+  );
+
+  $form['#validate'][] = 'username_user_admin_settings_validate';
+}
+
+/**
+ * Form validation handler for username_form_user_admin_settings_alter().
+ *
+ * @see user_validate_name()
+ */
+function username_user_admin_settings_validate($form, &$form_state) {
+  $values = $form_state['values'];
+
+  if ($values['automatic']) {
+    // Pattern is required.
+    if (empty($values['pattern'])) {
+      form_set_error('pattern', t('The <em>Pattern</em> field is required.'));
+    }
+
+    // Pattern cannot start or end with a space.
+    if (trim($values['pattern']) !== $values['pattern']) {
+      form_set_error('pattern', t('The <em>Pattern</em> field cannot start or end with a space.'));
+    }
+
+    // Pattern can only contain certain characters.
+    if (preg_match("/[^ a-z0-9@+_.'-\[\]:]/i", $values['pattern'])) {
+      form_set_error('pattern', t('The <em>Pattern</em> field contains an illegal character.'));
+    }
+  }
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter() for user_register_form().
+ */
+function username_form_user_register_form_alter(&$form, &$form_state, $form_id) {
+  if (config_get('username.settings', 'automatic')) {
+    // Hide the username field.
+    $form['account']['name']['#type'] = 'hidden';
+
+    // Set a temporary random string so it passes validation.
+    $form['account']['name']['#value'] = user_password();
+  }
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter() for user_profile_form().
+ */
+function username_form_user_profile_form_alter(&$form, &$form_state, $form_id) {
+  if (config_get('username.settings', 'automatic')) {
+    // Disable the username field.
+    $form['account']['name']['#disabled'] = TRUE;
+
+    // Set a description explaining why it's disabled.
+    $form['account']['name']['#description'] = t('This value is being automatically generated.');
+    if (user_access('administer account settings')) {
+      $form['account']['name']['#description'] .= ' ' . t('The pattern can be configured in the <a href="@settings">Account Settings</a>.', array(
+        '@settings' => url('admin/config/people/settings'),
+      ));
+    }
+  }
+}
+
+/**
+ * Implements hook_user_presave().
+ */
+function username_user_presave($account) {
+  // Generate the username.
+  $account->name = username_generate($account);
+}
+
+/**
+ * Generate a username for a user account.
+ *
+ * @param object $account
+ *   The user object to generate the username for.
+ *
+ * @return string
+ *   The generated username, or the existing username if a new one couldn't be
+ *   generated.
+ */
+function username_generate($account) {
+  $name = $account->name;
+  $config = config('username.settings');
+
+  if ($config->get('automatic')) {
+    // Generate a username based on the pattern.
+    $name = token_replace($config->get('pattern'), array('user' => $account), array(
+      'clear' => TRUE,
+      'callback' => 'username_clean_tokens',
+    ));
+
+    // If the generated username is different than the current username...
+    if ($name != $account->name) {
+      $i = 1;
+      $unique = FALSE;
+      $new_name = $name;
+
+      // Make sure the username is unique.
+      while (!$unique) {
+        $existing = user_load_by_name($new_name);
+
+        if ($existing && $existing->uid != $account->uid) {
+          $new_name = $name . '_' . $i;
+          $i++;
+        }
+        else {
+          $unique = TRUE;
+          $name = $new_name;
+        }
+      }
+    }
+  }
+
+  return $name;
+}
+
+/**
+ * Token callback: Clean tokens before using them.
+ *
+ * @see token_replace()
+ */
+function username_clean_tokens(&$replacements, $data, $options) {
+  foreach ($replacements as $token => $value) {
+    // Strip HTML tags.
+    $value = strip_tags($value);
+
+    // Transliterate.
+    include_once BACKDROP_ROOT . '/core/includes/transliteration.inc';
+    $value = transliteration_get($value, '');
+
+    // Remove illegal characters.
+    $value = preg_replace("/[^ a-z0-9@+_.'-]/i", '', $value);
+
+    $replacements[$token] = $value;
+  }
+}
